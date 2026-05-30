@@ -1,102 +1,105 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
+import pandas_ta as ta
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+import time
 
-st.set_page_config(page_title="Fawaz Confluence Hunter", page_icon="📈", layout="wide")
-st.title("🧠 Fawaz Confluence Hunter")
-st.markdown("**Multi-timeframe scanner** based on Fawaz Almutairi’s exact strategy (Saudi + US)")
+st.set_page_config(page_title="Fawaz Confluence Hunter", layout="wide", page_icon="📈")
 
-# Tickers (add more anytime)
-tickers = ["NVDA", "MSFT", "AAPL", "TSLA", "AMD", "2222.SR", "1120.SR", "2380.SR", "3092.SR", "7203.SR"]
+st.title("🧠 Fawaz Almutairi Confluence Scanner")
+st.markdown("**Multi-Timeframe Technical Scanner** - Pullback Setups (Saudi + US)")
 
-@st.cache_data(ttl=300)
+# Sidebar
+st.sidebar.header("Settings")
+markets = st.sidebar.selectbox("Market", ["US Tech/Growth", "Saudi TASI (Limited)", "Both"])
+min_score = st.sidebar.slider("Minimum Confluence Score", 70, 100, 85)
+
+# Tickers
+us_tickers = ['NVDA', 'MSFT', 'AAPL', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD']
+sa_tickers = ['2222.SR', '2380.SR', '2082.SR', '1120.SR']
+
+if markets == "US Tech/Growth":
+    tickers = us_tickers
+elif markets == "Saudi TASI (Limited)":
+    tickers = sa_tickers
+else:
+    tickers = us_tickers + sa_tickers
+
 def get_data(ticker):
     try:
-        data = yf.download(ticker, period="3mo", interval="1d", progress=False)
-        if len(data) < 50:
+        data = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        if data.empty or len(data) < 60:
             return None
-        data["EMA20"] = data["Close"].ewm(span=20).mean()
-        data["EMA50"] = data["Close"].ewm(span=50).mean()
-        delta = data["Close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        data["RSI"] = 100 - (100 / (1 + rs))
         return data
     except:
         return None
 
-def calculate_confluence(df):
-    if df is None or len(df) < 10:
-        return 0, "No data"
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    # Higher TF trend (Daily)
-    trend_score = 0
-    if latest["Close"] > latest["EMA20"] > latest["EMA50"]:
-        trend_score += 40
-    if latest["Close"] > prev["Close"]:
-        trend_score += 15
-    
-    # Pullback to EMA zone
-    pullback_score = 0
-    if abs(latest["Close"] - latest["EMA20"]) / latest["Close"] < 0.03:
-        pullback_score += 25
-    elif abs(latest["Close"] - latest["EMA50"]) / latest["Close"] < 0.05:
-        pullback_score += 20
-    
-    # Momentum (RSI)
-    momentum_score = 0
-    if latest["RSI"] > 50 and latest["RSI"] > prev["RSI"]:
-        momentum_score += 20
-    
-    total = trend_score + pullback_score + momentum_score
-    if total >= 85:
-        status = "🔥 PERFECT SETUP"
-    elif total >= 70:
-        status = "🟢 Strong"
-    else:
-        status = "⚪ Watch"
-    
-    return total, status
+def analyze_setup(df, ticker):
+    if df is None or len(df) < 60:
+        return None
+    try:
+        df = df.copy()
+        df['EMA20'] = ta.ema(df['Close'], length=20)
+        df['EMA50'] = ta.ema(df['Close'], length=50)
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        
+        close_latest = float(df['Close'].iloc[-1])
+        ema20_latest = float(df['EMA20'].iloc[-1])
+        ema50_latest = float(df['EMA50'].iloc[-1])
+        rsi_latest = float(df['RSI'].iloc[-1])
+        rsi_5ago = float(df['RSI'].iloc[-6]) if len(df) > 6 else rsi_latest
+        
+        # Fawaz Higher TF Trend
+        higher_trend_bull = (close_latest > ema20_latest > ema50_latest) and (ema20_latest > ema50_latest)
+        
+        # Pullback to EMA zone
+        recent_low = float(df['Close'].rolling(20).min().iloc[-1])
+        pullback = (close_latest > recent_low * 0.97) and (close_latest < ema20_latest * 1.03)
+        
+        # Momentum
+        rsi_rising = rsi_latest > rsi_5ago
+        
+        # Confluence Score
+        score = 0
+        if higher_trend_bull:
+            score += 40
+        if pullback:
+            score += 30
+        if rsi_rising and rsi_latest > 52:
+            score += 20
+        if close_latest > ema20_latest:
+            score += 10
+        
+        score = min(100, score)
+        
+        if score >= min_score:
+            return {
+                'ticker': ticker,
+                'price': round(close_latest, 2),
+                'change': round((close_latest / float(df['Close'].iloc[-2]) - 1) * 100, 2),
+                'score': score,
+                'trend': 'Strong Bullish 🔥' if higher_trend_bull else 'Neutral',
+                'setup': 'EMA Pullback + RSI' if pullback else 'Monitor',
+                'target': round(close_latest * 1.18, 2)
+            }
+    except:
+        return None
+    return None
 
-# Scanner
-st.subheader("📡 Live Scanner")
-data_list = []
-for ticker in tickers:
-    df = get_data(ticker)
-    if df is not None:
-        score, status = calculate_confluence(df)
-        latest_price = df["Close"].iloc[-1]
-        change = (df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100
-        data_list.append({
-            "Symbol": ticker,
-            "Price": round(latest_price, 2),
-            "% Change": round(change, 2),
-            "Confluence": score,
-            "Status": status,
-            "Data": df
-        })
-
-if data_list:
-    df_scan = pd.DataFrame(data_list)
-    df_scan = df_scan.sort_values("Confluence", ascending=False)
-    st.dataframe(df_scan[["Symbol", "Price", "% Change", "Confluence", "Status"]], use_container_width=True, hide_index=True)
-    
-    # Show charts for top setups
-    st.subheader("🔍 Top Setups Detail")
-    for row in df_scan.head(3).itertuples():
-        st.write(f"**{row.Symbol}** — Confluence: **{row.Confluence}/100** {row.Status}")
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=row.Data.index, open=row.Data["Open"], high=row.Data["High"], low=row.Data["Low"], close=row.Data["Close"], name="Price"))
-        fig.add_trace(go.Scatter(x=row.Data.index, y=row.Data["EMA20"], name="EMA 20", line=dict(color="orange")))
-        fig.add_trace(go.Scatter(x=row.Data.index, y=row.Data["EMA50"], name="EMA 50", line=dict(color="blue")))
-        fig.update_layout(height=400, template="plotly_dark", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("No data loaded yet — refresh in a minute.")
-
-st.caption("Built exactly to Fawaz Almutairi’s multi-timeframe rules • Updates every 5 minutes • Discipline first!")
+# Scanner Button
+if st.button("🔄 Run Fawaz Scanner Now"):
+    with st.spinner("Scanning for perfect high-confluence setups..."):
+        results = []
+        for ticker in tickers:
+            df = get_data(ticker)
+            setup = analyze_setup(df, ticker)
+            if setup:
+                results.append(setup)
+            time.sleep(0.3)
+        
+        if results:
+            df_results = pd.DataFrame(results)
+            df_results = df_results.sort_values('score', ascending=False)
+            
+            st.success(f"Found {len(results)} Perfect Fawaz Setups!")
